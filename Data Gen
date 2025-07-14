@@ -1,0 +1,122 @@
+```{r}
+# Load required libraries
+library(tidyverse)
+library(ggplot2)
+
+# =========================================
+# EXPANDED DATA GENERATION - 20 ALARMS
+# =========================================
+
+# Setup: Create realistic data with 20 alarms ranging from 3 to 500 cases
+set.seed(42)
+n_people <- 5000  # Increased to support more alarms
+
+# Create the base dataset of people and their outcomes
+people_data <- tibble(
+  person_id = 1:n_people,
+  is_actually_suspicious = rbinom(n_people, 1, 0.08)  # 8% base rate of actual ML
+)
+
+# Define 20 alarm types with varying trigger rates (to get 3-500 cases)
+alarm_definitions <- tibble(
+  alarm_type = c(
+    # High volume alarms (200-500 cases)
+    "Weekend_Activity", "High_Frequency", "Round_Amounts", "Large_Cash",
+    
+    # Medium volume alarms (50-200 cases)
+    "Spain_Payment", "Cross_Border", "Unusual_Country", "Cash_Intensive",
+    "Velocity_Change", "New_Payee", "Foreign_Exchange", "ATM_Pattern",
+    
+    # Low volume alarms (10-50 cases)
+    "PEP_Related", "Structuring", "Shell_Company", "Sanctions_Hit",
+    "Crypto_Related", "Gaming_Pattern",
+    
+    # Very low volume alarms (3-10 cases)
+    "Terror_Finance", "Rare_Country"
+  ),
+  
+  # Base trigger rates designed to give us the range we want
+  base_trigger_rate = c(
+    0.10, 0.08, 0.09, 0.06,
+    0.035, 0.025, 0.020, 0.030, 0.015, 0.040, 0.018, 0.022,
+    0.008, 0.006, 0.004, 0.009, 0.007, 0.005,
+    0.0015, 0.0012
+  ),
+  
+  # How much more likely to trigger if person is actually suspicious
+  suspicious_multiplier = c(
+    1.8, 4.1, 2.9, 2.8,
+    3.2, 3.3, 2.5, 2.7, 3.8, 2.2, 2.9, 2.4,
+    3.7, 4.8, 5.2, 4.5, 4.2, 3.9,
+    6.5, 5.8
+  ),
+  
+  threshold_value = c(
+    5, 10, 50000, 15000,
+    80000, 25000, 1, 20000, 5000, 1000, 10000, 8,
+    1, 9000, 1, 1, 50000, 15,
+    1, 1
+  )
+)
+
+# Function to generate alarm data
+generate_alarm_data <- function(people_df, alarm_def) {
+  person_alarm_combinations <- expand_grid(
+    person_id = people_df$person_id,
+    alarm_type = alarm_def$alarm_type
+  ) %>%
+    left_join(people_df, by = "person_id") %>%
+    left_join(alarm_def, by = "alarm_type") %>%
+    mutate(
+      trigger_probability = ifelse(
+        is_actually_suspicious == 1,
+        base_trigger_rate * suspicious_multiplier,
+        base_trigger_rate
+      ),
+      trigger_probability = pmin(trigger_probability, 0.95),
+      alarm_triggered = rbinom(n(), 1, trigger_probability)
+    ) %>%
+    filter(alarm_triggered == 1) %>%
+    select(person_id, alarm_type, threshold_value, is_actually_suspicious)
+  
+  return(person_alarm_combinations)
+}
+
+# Generate the expanded alarm data
+realistic_alarm_data <- generate_alarm_data(people_data, alarm_definitions)
+
+# Check what we got
+alarm_volume_check <- realistic_alarm_data %>%
+  count(alarm_type, sort = TRUE) %>%
+  mutate(
+    volume_category = case_when(
+      n >= 200 ~ "High (200+)",
+      n >= 50 ~ "Medium (50-200)",
+      n >= 10 ~ "Low (10-50)",
+      TRUE ~ "Very Low (<10)"
+    )
+  )
+
+print("=== ALARM VOLUME CHECK ===")
+print(alarm_volume_check)
+
+print("\n=== VOLUME DISTRIBUTION ===")
+print(table(alarm_volume_check$volume_category))
+
+print("\n=== BASIC STATISTICS ===")
+print(paste("Total people investigated:", n_people))
+print(paste("Total alarm instances:", nrow(realistic_alarm_data)))
+print(paste("People who triggered at least one alarm:", length(unique(realistic_alarm_data$person_id))))
+print(paste("Average alarms per person:", round(nrow(realistic_alarm_data) / length(unique(realistic_alarm_data$person_id)), 2)))
+print(paste("Alarm count range:", min(alarm_volume_check$n), "to", max(alarm_volume_check$n)))
+
+print("\n=== DATA STRUCTURE ===")
+print(head(realistic_alarm_data, 10))
+
+print("\n=== READY FOR ANALYSIS ===")
+print("You can now run the analysis code with this expanded dataset!")
+print("- 20 different alarm types")
+print("- Range from", min(alarm_volume_check$n), "to", max(alarm_volume_check$n), "cases")
+print("- Mix of high/medium/low volume alarms")
+print("- Realistic suspicious multipliers")
+```
