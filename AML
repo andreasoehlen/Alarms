@@ -1,0 +1,278 @@
+```{r}
+# Load required libraries
+library(tidyverse)
+library(ggplot2)
+library(ggrepel)
+
+# [Your data generation code would go here first]
+# Then run this analysis:
+
+# =========================================
+# IMPROVED CONFIDENCE INTERVALS + DATA SUFFICIENCY
+# =========================================
+
+# Calculate performance with better statistical rigor
+alarm_performance_robust <- realistic_alarm_data %>%
+  group_by(alarm_type) %>%
+  summarise(
+    total_triggers = n(),
+    true_positives = sum(is_actually_suspicious == 1),
+    false_positives = sum(is_actually_suspicious == 0),
+    tp_rate = true_positives / total_triggers,
+    .groups = 'drop'
+  ) %>%
+  mutate(
+    # Wilson confidence interval (better for small samples)
+    n = total_triggers,
+    p = tp_rate,
+    z = 1.96,
+    wilson_center = (p + z^2/(2*n)) / (1 + z^2/n),
+    wilson_width = z * sqrt(p*(1-p)/n + z^2/(4*n^2)) / (1 + z^2/n),
+    ci_lower = pmax(0, wilson_center - wilson_width),
+    ci_upper = pmin(1, wilson_center + wilson_width),
+    ci_width = ci_upper - ci_lower,
+    
+    # Flag when CI is unreliable
+    ci_unreliable = case_when(
+      total_triggers < 5 ~ "Critical (<5 cases)",
+      total_triggers < 15 ~ "Very Poor (5-15 cases)",
+      true_positives < 3 ~ "Too Few TPs (<3)",
+      (true_positives <= 1 & total_triggers < 20) ~ "Extreme Proportion",
+      ci_width > 0.4 ~ "CI Too Wide (>40%)",
+      TRUE ~ "Reliable"
+    ),
+    
+    # Simple binary flag for plotting
+    is_unreliable = ci_unreliable != "Reliable"
+  ) %>%
+  arrange(desc(tp_rate))
+
+print("=== ALARM PERFORMANCE WITH CI RELIABILITY FLAGS ===")
+print(select(alarm_performance_robust, alarm_type, tp_rate, total_triggers, 
+             true_positives, ci_lower, ci_upper, ci_width, ci_unreliable))
+
+# =========================================
+# PLOT 1: TP Rates with CI Reliability Indicators
+# =========================================
+library(ggplot2)
+
+p1 <- ggplot(alarm_performance_robust, aes(x = reorder(alarm_type, tp_rate), y = tp_rate)) +
+  geom_col(aes(fill = is_unreliable), alpha = 0.7) +
+  geom_errorbar(aes(ymin = ci_lower, ymax = ci_upper), width = 0.2, color = "black", size = 0.8) +
+  
+  # ✅ TP rate labels at start of bar (nudge left)
+  geom_text(
+    aes(label = paste0(round(tp_rate * 100, 1), "%")),
+    position = position_nudge(x = -0.03), hjust = 1, size = 3
+  ) +
+  
+  # Clean fallback warning symbol
+  geom_text(
+    data = filter(alarm_performance_robust, is_unreliable),
+    aes(x = alarm_type, y = ci_upper + 0.03, label = "*"),
+    size = 5, hjust = 0.5, inherit.aes = FALSE
+  ) +
+  
+  coord_flip() +
+  scale_fill_manual(
+    values = c("FALSE" = "steelblue", "TRUE" = "orange"),
+    labels = c("FALSE" = "Reliable CI", "TRUE" = "Unreliable CI"),
+    name = "CI Quality"
+  ) +
+  labs(
+    title = "TP Rates with 95% Confidence Intervals",
+    subtitle = "Orange bars + * = unreliable CI estimates, Blue bars = reliable",
+    x = "Alarm Type",
+    y = "True Positive Rate"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(size = 14, face = "bold"),
+    axis.text.y = element_text(size = 9),
+    legend.position = "bottom"
+  )
+
+print(p1)
+
+
+# =========================================
+# ALARM OVERLAP ANALYSIS
+# =========================================
+
+# Create person-level alarm combinations
+person_alarms <- realistic_alarm_data %>%
+  group_by(person_id) %>%
+  summarise(
+    is_suspicious = first(is_actually_suspicious),
+    alarm_count = n(),
+    alarm_list = list(sort(alarm_type)),
+    alarm_string = paste(sort(alarm_type), collapse = " + "),
+    .groups = 'drop'
+  )
+
+# Calculate pairwise alarm overlap (fix the many-to-many warning)
+alarm_pairs <- realistic_alarm_data %>%
+  select(person_id, alarm_type) %>%
+  inner_join(realistic_alarm_data %>% select(person_id, alarm_type), 
+             by = "person_id", suffix = c("_1", "_2"), 
+             relationship = "many-to-many") %>%
+  filter(alarm_type_1 < alarm_type_2) %>%  # Avoid duplicates and self-pairs
+  count(alarm_type_1, alarm_type_2) %>%
+  rename(overlap_count = n)
+
+# Create a more informative overlap analysis
+alarm_overlap_stats <- alarm_pairs %>%
+  left_join(realistic_alarm_data %>% 
+              count(alarm_type) %>% 
+              rename(alarm_type_1 = alarm_type, count_1 = n)) %>%
+  left_join(realistic_alarm_data %>% 
+              count(alarm_type) %>% 
+              rename(alarm_type_2 = alarm_type, count_2 = n)) %>%
+  mutate(
+    # Calculate overlap as % of smaller alarm
+    overlap_pct = overlap_count / pmin(count_1, count_2),
+    # Jaccard similarity (intersection / union)
+    jaccard = overlap_count / (count_1 + count_2 - overlap_count)
+  ) %>%
+  arrange(desc(overlap_pct))
+
+print("=== ALARM OVERLAP STATISTICS ===")
+print("Top overlapping alarm pairs:")
+print(select(alarm_overlap_stats, alarm_type_1, alarm_type_2, overlap_count, 
+             overlap_pct, jaccard))
+
+# =========================================
+# PLOT 2: Alarm Overlap (Clean Version)
+# =========================================
+overlap_for_plot <- alarm_overlap_stats %>%
+  mutate(pair = paste(alarm_type_1, "×", alarm_type_2)) %>%
+  select(pair, overlap_count, overlap_pct) %>%
+  arrange(desc(overlap_pct)) %>%
+  head(10)  # Show top 10 to avoid overcrowding
+
+p2 <- ggplot(overlap_for_plot, aes(x = reorder(pair, overlap_pct), y = overlap_pct)) +
+  geom_col(fill = "coral", alpha = 0.7) +
+  geom_text(aes(label = paste0(round(overlap_pct*100, 1), "%")), 
+            hjust = -0.1, size = 3.5) +
+  coord_flip() +
+  labs(
+    title = "Top 10 Alarm Overlaps",
+    subtitle = "% of people triggering both alarms (relative to smaller alarm)",
+    x = "Alarm Pair",
+    y = "Overlap Rate"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.y = element_text(size = 9),
+    plot.title = element_text(size = 14, face = "bold")
+  )
+
+print(p2)
+
+# =========================================
+# INCREMENTAL VALUE ANALYSIS
+# =========================================
+
+# For each alarm, calculate what unique value it adds
+alarm_incremental_value <- realistic_alarm_data %>%
+  group_by(alarm_type) %>%
+  summarise(
+    total_triggers = n(),
+    total_tp = sum(is_actually_suspicious == 1),
+    .groups = 'drop'
+  ) %>%
+  mutate(
+    # Calculate how many TPs this alarm finds that others don't
+    unique_tp = map_dbl(alarm_type, function(focal_alarm) {
+      # People caught by this alarm
+      focal_people <- realistic_alarm_data %>%
+        filter(alarm_type == focal_alarm) %>%
+        pull(person_id)
+      
+      # People caught by other alarms
+      other_people <- realistic_alarm_data %>%
+        filter(alarm_type != focal_alarm) %>%
+        pull(person_id) %>%
+        unique()
+      
+      # Unique people caught by focal alarm
+      unique_people <- setdiff(focal_people, other_people)
+      
+      # How many of these unique people are actually suspicious?
+      unique_suspicious <- realistic_alarm_data %>%
+        filter(person_id %in% unique_people, alarm_type == focal_alarm) %>%
+        summarise(unique_tp = sum(is_actually_suspicious)) %>%
+        pull(unique_tp)
+      
+      return(unique_suspicious)
+    })
+  ) %>%
+  mutate(
+    redundant_tp = total_tp - unique_tp,
+    redundancy_rate = redundant_tp / total_tp,
+    unique_value_score = unique_tp / total_triggers  # Unique TPs per trigger
+  ) %>%
+  arrange(desc(unique_value_score))
+
+print("\n=== INCREMENTAL VALUE ANALYSIS ===")
+print("Alarms ranked by unique value (TPs found that no other alarm catches):")
+print(select(alarm_incremental_value, alarm_type, total_tp, unique_tp, 
+             redundant_tp, redundancy_rate, unique_value_score))
+
+# =========================================
+# PLOT 3: Redundancy vs Performance (Clean Version)
+# =========================================
+p3 <- ggplot(alarm_incremental_value, aes(x = redundancy_rate, y = unique_value_score)) +
+  geom_point(size = 4, alpha = 0.7, color = "darkred") +
+  ggrepel::geom_text_repel(aes(label = alarm_type), 
+                           size = 3, 
+                           max.overlaps = 30,  # Prevent excessive overlap
+                           box.padding = 0.5,
+                           point.padding = 0.3,
+                           segment.color = "grey50") +
+  labs(
+    title = "Alarm Redundancy vs Unique Value",
+    subtitle = "Top-right: High unique value, low redundancy (GOOD)\nBottom-right: Low unique value, high redundancy (BAD)",
+    x = "Redundancy Rate (% of TPs also caught by other alarms)",
+    y = "Unique Value Score (Unique TPs per trigger)"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(size = 14, face = "bold"),
+    plot.subtitle = element_text(size = 11)
+  ) +
+  scale_y_continuous(expand = expansion(mult = c(0.1, 0.15))) +
+  scale_x_continuous(expand = expansion(mult = c(0.05, 0.05)))
+
+print(p3)
+
+# =========================================
+# SUMMARY INSIGHTS
+# =========================================
+print("\n=== KEY INSIGHTS ===")
+
+unreliable_alarms <- alarm_performance_robust %>%
+  filter(is_unreliable) %>%
+  pull(alarm_type)
+
+if(length(unreliable_alarms) > 0) {
+  print(paste("⚠️  UNRELIABLE ESTIMATES:", paste(unreliable_alarms, collapse = ", ")))
+  print("   → Need more data before making decisions about these alarms")
+}
+
+high_redundancy <- alarm_incremental_value %>%
+  filter(redundancy_rate > 0.7) %>%
+  pull(alarm_type)
+
+if(length(high_redundancy) > 0) {
+  print(paste("🔄 HIGH REDUNDANCY:", paste(high_redundancy, collapse = ", ")))
+  print("   → These alarms mostly catch cases already caught by others")
+}
+
+high_unique_value <- alarm_incremental_value %>%
+  filter(unique_value_score > median(unique_value_score)) %>%
+  pull(alarm_type)
+
+print(paste("⭐ HIGH UNIQUE VALUE:", paste(high_unique_value, collapse = ", ")))
+print("   → These alarms find cases others miss - keep these!")
+```
